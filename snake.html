@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Snake</title>
+<style>
+  html, body { margin: 0; padding: 0; background: #111111; }
+  body { min-height: 100vh; display: flex; align-items: center; justify-content: center; }
+  canvas { display: block; background: #111111; }
+</style>
+</head>
+<body>
+<canvas id="game" width="600" height="600"></canvas>
+<script>
+(() => {
+  'use strict';
+
+  const canvas = document.getElementById('game');
+  const ctx = canvas.getContext('2d');
+  const GRID = 30;
+  const CELL = 20;
+  const SIZE = GRID * CELL;
+  const BASE_SPEED = 8;
+  const MAX_SPEED = 20;
+  const HS_KEY = 'snakeHighScore';
+
+  const DIRS = {
+    ArrowUp: { x: 0, y: -1 }, KeyW: { x: 0, y: -1 },
+    ArrowDown: { x: 0, y: 1 }, KeyS: { x: 0, y: 1 },
+    ArrowLeft: { x: -1, y: 0 }, KeyA: { x: -1, y: 0 },
+    ArrowRight: { x: 1, y: 0 }, KeyD: { x: 1, y: 0 }
+  };
+
+  let snake, dir, pendingDir, food;
+  let score, highScore, foodsEaten, speed;
+  let paused, gameOver, acc, lastTime;
+
+  function loadHigh() {
+    try { return parseInt(localStorage.getItem(HS_KEY), 10) || 0; } catch (e) { return 0; }
+  }
+
+  function saveHigh(v) {
+    try { localStorage.setItem(HS_KEY, String(v)); } catch (e) { /* storage unavailable */ }
+  }
+
+  function spawnFood() {
+    const taken = new Set(snake.map(p => p.x * GRID + p.y));
+    const empty = [];
+    for (let i = 0; i < GRID * GRID; i++) if (!taken.has(i)) empty.push(i);
+    if (empty.length === 0) { food = null; return; }
+    const c = empty[Math.floor(Math.random() * empty.length)];
+    food = { x: Math.floor(c / GRID), y: c % GRID };
+  }
+
+  function reset() {
+    snake = [{ x: 15, y: 15 }, { x: 14, y: 15 }, { x: 13, y: 15 }];
+    dir = { x: 1, y: 0 };
+    pendingDir = null;
+    score = 0;
+    foodsEaten = 0;
+    speed = BASE_SPEED;
+    paused = false;
+    gameOver = false;
+    acc = 0;
+    spawnFood();
+  }
+
+  function endGame() {
+    gameOver = true;
+    if (score > highScore) { highScore = score; saveHigh(highScore); }
+  }
+
+  function tick() {
+    if (pendingDir) { dir = pendingDir; pendingDir = null; }
+    const head = { x: snake[0].x + dir.x, y: snake[0].y + dir.y };
+    if (head.x < 0 || head.y < 0 || head.x >= GRID || head.y >= GRID) return endGame();
+    const willEat = food !== null && head.x === food.x && head.y === food.y;
+    const limit = willEat ? snake.length : snake.length - 1;
+    for (let i = 0; i < limit; i++) {
+      if (snake[i].x === head.x && snake[i].y === head.y) return endGame();
+    }
+    snake.unshift(head);
+    if (willEat) {
+      score += 10;
+      foodsEaten++;
+      if (score > highScore) { highScore = score; saveHigh(highScore); }
+      if (foodsEaten % 5 === 0 && speed < MAX_SPEED) speed = Math.min(speed * 1.05, MAX_SPEED);
+      spawnFood();
+    } else {
+      snake.pop();
+    }
+  }
+
+  function overlay(text) {
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.6)';
+    ctx.fillRect(0, 0, SIZE, SIZE);
+    ctx.fillStyle = '#ffffff';
+    ctx.font = 'bold 24px monospace';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(text, SIZE / 2, SIZE / 2);
+  }
+
+  function render() {
+    ctx.fillStyle = '#111111';
+    ctx.fillRect(0, 0, SIZE, SIZE);
+    ctx.strokeStyle = '#222222';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    for (let i = 1; i < GRID; i++) {
+      const p = i * CELL + 0.5;
+      ctx.moveTo(p, 0);
+      ctx.lineTo(p, SIZE);
+      ctx.moveTo(0, p);
+      ctx.lineTo(SIZE, p);
+    }
+    ctx.stroke();
+    if (food) {
+      ctx.fillStyle = '#ef4444';
+      ctx.beginPath();
+      ctx.arc(food.x * CELL + CELL / 2, food.y * CELL + CELL / 2, 8, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    for (let i = snake.length - 1; i >= 0; i--) {
+      const s = snake[i];
+      ctx.fillStyle = i === 0 ? '#16a34a' : '#4ade80';
+      ctx.fillRect(s.x * CELL + 1, s.y * CELL + 1, CELL - 2, CELL - 2);
+    }
+    ctx.fillStyle = '#e5e7eb';
+    ctx.font = 'bold 16px monospace';
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'top';
+    ctx.fillText('Score: ' + score, 8, 8);
+    ctx.fillText('Best: ' + highScore, 8, 28);
+    if (gameOver) overlay('GAME OVER - press R to restart');
+    else if (paused) overlay('PAUSED');
+  }
+
+  function frame(now) {
+    let dt = now - lastTime;
+    lastTime = now;
+    if (dt > 250) dt = 250; // clamp long gaps (e.g. tab switch) to avoid a catch-up burst
+    if (!paused && !gameOver) {
+      acc += dt;
+      const step = 1000 / speed;
+      while (acc >= step && !gameOver) {
+        acc -= step;
+        tick();
+      }
+    }
+    render();
+    requestAnimationFrame(frame);
+  }
+
+  window.addEventListener('keydown', (e) => {
+    const k = e.code;
+    if (k === 'Space' || k.startsWith('Arrow')) e.preventDefault();
+    if (e.repeat) return;
+    if (gameOver) {
+      if (k === 'KeyR') reset();
+      return;
+    }
+    if (paused) {
+      if (k === 'Space') paused = false;
+      else if (k === 'KeyR') reset();
+      return;
+    }
+    if (k === 'Space') { paused = true; return; }
+    const d = DIRS[k];
+    if (!d || (d.x === -dir.x && d.y === -dir.y)) return; // never reverse into itself
+    pendingDir = d;
+  });
+
+  highScore = loadHigh();
+  reset();
+  lastTime = performance.now();
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
