@@ -61,7 +61,7 @@ The model host is a Windows desktop; the agent client is a Mac on the same LAN.
 | Capabilities | Vision, Tool use, Reasoning |
 | Size on disk | 11.60 GB |
 | API model identifier | `qwen3.8-27b@q2_k_xl` |
-| Loaded context | **64,000 tokens** |
+| Loaded context (this run) | **128,000 tokens** |
 | Model max context | 262,144 tokens |
 
 The "UD" matters. `UD-Q2_K_XL` is Unsloth Dynamic quantization, which assigns different
@@ -72,22 +72,37 @@ below.
 
 ### Context vs. VRAM on a 16 GB card
 
-Weights are 11.60 GB. At a 32K context the loaded footprint measured ~14.9 GB, which puts
-KV cache plus compute buffers at roughly 3.3 GB, or ~105 KB per token. Extrapolating:
+The weights are 11.60 GB, so on a 16 GB card the KV cache is what decides whether the whole
+working set stays resident — and the KV cache grows linearly with the context window. That
+turns context length into a direct trade against generation speed.
 
-| Context | KV cache + buffers (est.) | Total (est.) | Fits in 16 GB VRAM? |
+Measured on this machine. Same model, same quantization, same prompt style; only the
+context window changed:
+
+| Context window | Throughput | GPU | System RAM (of 32 GB) |
 |---|---|---|---|
-| 32K | ~3.3 GB | ~14.9 GB | yes, barely |
-| 64K | ~6.6 GB | ~18.2 GB | no — spills to system RAM |
-| 64K with Q8_0 KV cache | ~3.3 GB | ~14.9 GB | yes |
-| 128K | ~13 GB | ~25 GB | no |
+| 64K | **38 tok/s** | 90% | 75% |
+| 128K — the documented run | **25 tok/s** | 100% | 92% |
 
-This run used 64K, so part of the model was served from system RAM rather than VRAM —
-consistent with the measured 25 tok/s. If you want a large context to stay resident,
-enable **K/V Cache Quantization (Q8_0)** in LM Studio's model load settings; it roughly
-halves the KV cache for a negligible quality cost. It requires Flash Attention to be
-enabled in the same panel. If something misbehaves, `K=Q8_0, V=F16` is the safer
-intermediate — the V cache is more sensitive to quantization than the K cache.
+**Halving the context bought 52% more throughput.** At 128K both the card and system
+memory are pinned near their limits, so part of every forward pass has to be served from
+DDR5 across PCIe instead of from VRAM. At 64K there is headroom on both, and the model
+stops paying that toll on every token.
+
+This is also why the documented run shows a **16.8 s time to first token**. Neither that
+nor the 25 tok/s is a property of the model — both are the cost of running a 128K window
+on a card that cannot hold it.
+
+The practical reading: on a VRAM-constrained card, context length is not a free parameter
+you set to the largest value that loads. Size the window to the work. A coding agent that
+compacts its own history rarely needs 128K, and 64K here is both meaningfully faster and
+comfortably enough — this entire run peaked at ~30.6K tokens of context.
+
+If you do need a large window, enable **K/V Cache Quantization (Q8_0)** in LM Studio's
+model load settings. It roughly halves the KV cache for a negligible quality cost, and it
+requires Flash Attention to be enabled in the same panel. If something misbehaves,
+`K=Q8_0, V=F16` is the safer intermediate — the V cache is more sensitive to quantization
+than the K cache.
 
 ## DeepSeek Harness
 
@@ -163,10 +178,14 @@ curl -s "http://<lm-studio-host>:1234/api/v0/models/qwen3.8-27b@q2_k_xl"
   "quantization": "Q2_K_XL",
   "state": "loaded",
   "max_context_length": 262144,
-  "loaded_context_length": 64000,
+  "loaded_context_length": 128000,
   "capabilities": ["tool_use"]
 }
 ```
+
+`loaded_context_length` is the one worth reading. It is the window LM Studio actually
+allocated, as opposed to `max_context_length`, which is only what the model declares it
+could support. Clients generally show you the latter.
 
 ## The run
 
@@ -185,13 +204,16 @@ questions.
 | Prompt cache hit | 0% |
 | Input tokens | 69.2K (cumulative across steps) |
 | Context used | ~30.6K — system prompt ~1.5K, tools ~6.4K, messages ~20.3K |
+| Context window | 128K (loaded in LM Studio) |
+| GPU during the run | 100% VRAM utilization |
+| System RAM during the run | 92% of 32 GB |
 | Agent mode | Workspace Write |
 | Produced | `snake.html`, 181 lines |
 
 > **Note on the 262K in that screenshot.** The harness reads the model's declared
-> `max_context_length` (262,144) and shows the run as using 12% of it. The window LM
-> Studio actually loaded was 64,000 tokens. The harness has no way to know that, so the
-> percentage is optimistic — overflow past the real window is handled on the LM Studio
+> `max_context_length` (262,144) and reports the run as using 12% of it. The window LM
+> Studio actually loaded was 128,000 tokens, so the real figure is ~24%. The harness has no
+> way to know the difference — overflow past the real window is handled on the LM Studio
 > side, not warned about in the UI. Worth knowing before you trust that progress bar on a
 > long session.
 
@@ -291,6 +313,19 @@ yanlış yazılan satırdır.
 Bunun teknik açıklaması büyük ihtimalle kuantizasyonun kendisi: `UD-Q2_K_XL`, katmanları
 tek tip 2-bit'e indirmek yerine katman başına farklı bit genişlikleri atayan Unsloth
 Dynamic kuantizasyonu. "Q2" etiketi bu dosyayı hak ettiğinden daha kötü gösteriyor.
+
+Yan bulgu — 16 GB'lık bir kartta context uzunluğu bedava bir parametre değil. Aynı makinede,
+aynı modelle, yalnızca context penceresini değiştirerek:
+
+| Context | Hız | GPU | Sistem RAM (32 GB'ın) |
+|---|---|---|---|
+| 64K | **38 tok/s** | %90 | %75 |
+| 128K (bu run) | **25 tok/s** | %100 | %92 |
+
+Context'i yarıya indirmek hızı **%52 artırdı**. 128K'da hem kart hem sistem belleği
+sınırda; modelin bir kısmı VRAM yerine PCIe üzerinden DDR5'ten besleniyor ve bu bedel her
+token'da ödeniyor. Pencereyi işin boyutuna göre seçmek gerekiyor: bu run'ın tamamı zaten
+~30.6K token'da kaldı.
 
 ## License
 
